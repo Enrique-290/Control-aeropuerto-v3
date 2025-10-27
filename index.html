@@ -1,0 +1,307 @@
+
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>✈️ Control Aeropuerto v3</title>
+<style>
+  :root{ --rojo:#e53935; --borde:#e5e7eb; }
+  *{box-sizing:border-box;font-family:system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,Arial}
+  body{margin:0;background:#fff;color:#111}
+  header{position:sticky;top:0;z-index:10;background:#fff;border-bottom:1px solid var(--borde)}
+  .bar{display:flex;gap:.5rem;align-items:center;justify-content:space-between;padding:.75rem 1rem;flex-wrap:wrap}
+  .title{font-weight:800}
+  .btn{padding:.6rem .9rem;border:1px solid var(--borde);border-radius:.8rem;background:#fff;cursor:pointer;font-weight:600}
+  .btn.primary{background:var(--rojo);color:#fff;border-color:var(--rojo)}
+  .wrap{max-width:1100px;margin:0 auto;padding:1rem}
+  .controls{display:flex;gap:.5rem;flex-wrap:wrap;margin:.75rem 0}
+  input[type="text"], input[type="date"], input[type="time"]{padding:.6rem;border:1px solid var(--borde);border-radius:.7rem;min-width:10rem}
+  table{width:100%;border-collapse:collapse;margin-top:.5rem}
+  th,td{border:1px solid var(--borde);padding:.5rem;text-align:left}
+  th{background:#f8fafc;position:sticky;top:64px;z-index:1}
+  tr:hover td{background:#fff7f7}
+  .bottom-add{position:sticky;bottom:0;background:#fff;border-top:1px solid var(--borde);padding:.6rem;display:flex;gap:.5rem;flex-wrap:wrap}
+  .center{text-align:center}
+  .muted{opacity:.7}
+</style>
+</head>
+<body>
+<header>
+  <div class="bar">
+    <div class="title">✈️ Control Aeropuerto v3</div>
+    <div style="display:flex;gap:.5rem;flex-wrap:wrap">
+      <button id="btnExport" class="btn">Exportar CSV</button>
+      <label class="btn">
+        Importar CSV
+        <input id="fileCsv" type="file" accept=".csv,.txt" style="display:none">
+      </label>
+      <button id="btnReset" class="btn">Borrar todo</button>
+    </div>
+  </div>
+</header>
+
+<div class="wrap">
+  <div class="controls">
+    <input id="buscar" type="text" placeholder="Buscar por nombre o vuelo">
+  </div>
+
+  <table id="tabla">
+    <thead>
+      <tr id="theadRow"></tr>
+    </thead>
+    <tbody id="tbody"></tbody>
+  </table>
+</div>
+
+<div class="bottom-add">
+  <input id="nuevoNombre" type="text" placeholder="Nombre">
+  <input id="nuevaFecha" type="date" placeholder="Fecha">
+  <input id="nuevoVuelo" type="text" placeholder="Vuelo (ej. AM 714)">
+  <input id="nuevaSale" type="time" placeholder="Sale">
+  <input id="nuevaLlega" type="time" placeholder="Llega">
+  <button id="btnAgregar" class="btn primary">Agregar pasajero</button>
+  <span class="muted">Se guarda en tu navegador</span>
+</div>
+
+<script>
+const key = "control_aeropuerto_v3";
+
+const HEADERS = ["#","NOMBRE","FECHA","VUELO","SALE","LLEGA","Estatus","Notas",""];
+
+// --- Utilidades ---
+function detectDelimiter(line){
+  const counts = {",": (line.match(/,/g)||[]).length, ";": (line.match(/;/g)||[]).length, "\t": (line.match(/\t/g)||[]).length};
+  let best = ","; let max = -1;
+  for(const k in counts){ if(counts[k] > max){ max = counts[k]; best = k; } }
+  return best === "\t" ? "\t" : best;
+}
+
+function splitCSV(line, delim){
+  // delim is ',' ';' or '	'
+  const pattern = new RegExp(`("(?:[^"]|"")*"|[^${delim}]+)|(${delim})`, "g");
+  const out = [];
+  let m, last = "", expectingDelim=false;
+  let token = "";
+  let i=0;
+  const d = delim;
+  // Simpler: iterate characters honoring quotes
+  let inQuotes=false;
+  for(let c of line){
+    if(c === '"'){ inQuotes = !inQuotes; token += c; continue; }
+    if(!inQuotes && c === d){ out.push(token.trim()); token=""; continue; }
+    token += c;
+  }
+  out.push(token.trim());
+  return out.map(v=>v.replace(/^"|"$/g,"").replaceAll('""','"'));
+}
+
+function to24h(s){
+  if(!s) return "";
+  let t = s.toString().trim().toLowerCase();
+  t = t.replace(/\s+/g,' ').replace(/\./g,'');
+  // already HH:MM ?
+  const m24 = t.match(/^([01]?\d|2[0-3]):([0-5]\d)$/);
+  if(m24) return `${m24[1].padStart(2,'0')}:${m24[2]}`;
+  // 12h like 6:25 pm
+  const m12 = t.match(/^([0]?[1-9]|1[0-2]):([0-5]\d)\s*(am|pm|a m|p m)?$/i);
+  if(m12){
+    let hh = parseInt(m12[1],10); const mm = m12[2]; const ap = (m12[3]||"").replace(/\s/g,'').toLowerCase();
+    if(ap.startsWith("p") && hh !== 12) hh += 12;
+    if(ap.startsWith("a") && hh === 12) hh = 0;
+    return `${String(hh).padStart(2,'0')}:${mm}`;
+  }
+  return "";
+}
+
+function normDate(s){
+  if(!s) return "";
+  s = s.trim();
+  // dd/mm/yyyy
+  const dmy = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+  if(dmy){ const d=dmy[1].padStart(2,'0'), m=dmy[2].padStart(2,'0'), y=dmy[3]; return `${d}/${m}/${y}`; }
+  // yyyy-mm-dd
+  const ymd = s.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if(ymd){ return `${ymd[3]}/${ymd[2]}/${ymd[1]}`; }
+  return s;
+}
+
+// --- Estado ---
+function loadState(){
+  const saved = localStorage.getItem(key);
+  if(saved) return JSON.parse(saved);
+  return {rows: __SEED__};
+}
+let state = loadState();
+function save(){ localStorage.setItem(key, JSON.stringify(state)); }
+
+// --- Render ---
+function render(){
+  const thead = document.getElementById("theadRow"); thead.innerHTML = "";
+  HEADERS.forEach(h=>{ const th=document.createElement("th"); th.textContent=h; thead.appendChild(th); });
+
+  const q = document.getElementById("buscar").value.toLowerCase();
+  const tbody = document.getElementById("tbody"); tbody.innerHTML="";
+  state.rows.forEach((row, i)=>{
+    if(q && !(row.NOMBRE.toLowerCase().includes(q) || (row.VUELO||"").toLowerCase().includes(q))) return;
+
+    const tr = document.createElement("tr");
+    let td = document.createElement("td"); td.textContent = i+1; tr.appendChild(td);
+
+    td = document.createElement("td");
+    const inNom = document.createElement("input"); inNom.type="text"; inNom.value=row.NOMBRE||"";
+    inNom.onchange = e=>{ row.NOMBRE = e.target.value; save(); };
+    td.appendChild(inNom); tr.appendChild(td);
+
+    td = document.createElement("td");
+    const inFecha = document.createElement("input"); inFecha.type="date";
+    inFecha.value = row.FECHA ? row.FECHA.split("/").reverse().join("-") : "";
+    inFecha.onchange = e=>{
+      const v = e.target.value;
+      if(v){ const [y,m,d]=v.split("-"); row.FECHA = `${d}/${m}/${y}`; } else { row.FECHA=""; }
+      save();
+    };
+    td.appendChild(inFecha); tr.appendChild(td);
+
+    td = document.createElement("td");
+    const inVuelo = document.createElement("input"); inVuelo.type="text"; inVuelo.value=row.VUELO||"";
+    inVuelo.onchange = e=>{ row.VUELO = e.target.value; save(); };
+    td.appendChild(inVuelo); tr.appendChild(td);
+
+    td = document.createElement("td");
+    const inSale = document.createElement("input"); inSale.type="time"; inSale.value = to24h(row.SALE);
+    inSale.onchange = e=>{ row.SALE = to24h(e.target.value); save(); };
+    td.appendChild(inSale); tr.appendChild(td);
+
+    td = document.createElement("td");
+    const inLlega = document.createElement("input"); inLlega.type="time"; inLlega.value = to24h(row.LLEGA);
+    inLlega.onchange = e=>{ row.LLEGA = to24h(e.target.value); save(); };
+    td.appendChild(inLlega); tr.appendChild(td);
+
+    td = document.createElement("td"); td.className="center";
+    const chk = document.createElement("input"); chk.type="checkbox"; chk.checked = !!row.Estatus;
+    chk.onchange = e=>{ row.Estatus = e.target.checked ? 1 : ""; save(); };
+    td.appendChild(chk); tr.appendChild(td);
+
+    td = document.createElement("td");
+    const inNotas = document.createElement("input"); inNotas.type="text"; inNotas.value=row.Notas||"";
+    inNotas.onchange = e=>{ row.Notas = e.target.value; save(); };
+    td.appendChild(inNotas); tr.appendChild(td);
+
+    td = document.createElement("td");
+    const del = document.createElement("button"); del.className="btn"; del.textContent="Eliminar";
+    del.onclick = ()=>{ state.rows.splice(i,1); save(); render(); };
+    td.appendChild(del); tr.appendChild(td);
+
+    tbody.appendChild(tr);
+  });
+}
+
+// --- Acciones ---
+document.getElementById("btnAgregar").onclick = ()=>{
+  const n = document.getElementById("nuevoNombre").value.trim();
+  const f = document.getElementById("nuevaFecha").value;
+  const v = document.getElementById("nuevoVuelo").value.trim();
+  const s = document.getElementById("nuevaSale").value;
+  const l = document.getElementById("nuevaLlega").value;
+  if(!n) return;
+  const fecha = f ? (()=>{const [y,m,d]=f.split("-"); return `${d}/${m}/${y}`;})() : "";
+  state.rows.push({NOMBRE:n, FECHA:fecha, VUELO:v, SALE:to24h(s), LLEGA:to24h(l), Estatus:"", Notas:""});
+  ["nuevoNombre","nuevaFecha","nuevoVuelo","nuevaSale","nuevaLlega"].forEach(id=> document.getElementById(id).value="");
+  save(); render();
+};
+
+document.getElementById("buscar").oninput = render;
+
+document.getElementById("btnReset").onclick = ()=>{
+  if(confirm("¿Borrar todo y restaurar la lista inicial?")){
+    localStorage.removeItem(key);
+    state = {rows: __SEED__};
+    save(); render();
+  }
+};
+
+function toCSV(){
+  const headers = ["NOMBRE","FECHA","VUELO","SALE","LLEGA","Estatus","Notas"];
+  const lines = [headers.join(",")];
+  state.rows.forEach(r=>{
+    const vals = [r.NOMBRE||"", r.FECHA||"", r.VUELO||"", to24h(r.SALE||""), to24h(r.LLEGA||""), r.Estatus?1:"", r.Notas||""];
+    const esc = vals.map(v => `"${String(v).replaceAll('"','""')}"`);
+    lines.push(esc.join(","));
+  });
+  return lines.join("\n");
+}
+
+document.getElementById("btnExport").onclick = ()=>{
+  const blob = new Blob([toCSV()],{type:"text/csv;charset=utf-8;"});
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = "control_aeropuerto.csv";
+  a.click();
+};
+
+document.getElementById("fileCsv").onchange = (e)=>{
+  const f = e.target.files[0]; if(!f) return;
+  const reader = new FileReader();
+  reader.onload = ()=>{
+    let text = reader.result;
+    // normalizar saltos de línea
+    text = text.replace(/\r\n/g,'\n').replace(/\r/g,'\n');
+    const lines = text.split(/\n/).filter(x=>x.trim().length);
+    if(!lines.length) return;
+    const first = lines[0];
+    // detectar delimitador
+    let delim = detectDelimiter(first);
+    // convertir "\t" a real tab
+    delim = (delim === "\t") ? "\t" : delim;
+    const d = delim === "\t" ? "\t" : delim;
+
+    function parseLine(line){
+      // parse respetando comillas
+      let arr = []; let token=""; let inQ=false;
+      for(let i=0;i<line.length;i++){
+        const ch=line[i];
+        if(ch === '"'){ inQ = !inQ; continue; }
+        if(!inQ && ch === d){ arr.push(token); token=""; continue; }
+        token += ch;
+      }
+      arr.push(token);
+      return arr.map(v=>v.trim());
+    }
+
+    const headers = parseLine(lines[0]).map(h=>h.replace(/^"|"$|\uFEFF/g,''));
+    const idx = {
+      NOMBRE: headers.findIndex(h=>h.toUpperCase()==="NOMBRE"),
+      FECHA: headers.findIndex(h=>h.toUpperCase()==="FECHA"),
+      VUELO: headers.findIndex(h=>h.toUpperCase()==="VUELO"),
+      SALE: headers.findIndex(h=>h.toUpperCase()==="SALE"),
+      LLEGA: headers.findIndex(h=>h.toUpperCase()==="LLEGA"),
+      Estatus: headers.findIndex(h=>h.toUpperCase()==="ESTATUS"),
+      Notas: headers.findIndex(h=>h.toUpperCase()==="NOTAS"),
+    };
+
+    state.rows = lines.slice(1).map(line=>{
+      const cols = parseLine(line);
+      const obj = {
+        NOMBRE: (idx.NOMBRE>=0? cols[idx.NOMBRE]: "") || "",
+        FECHA: normDate((idx.FECHA>=0? cols[idx.FECHA]: "") || ""),
+        VUELO: (idx.VUELO>=0? cols[idx.VUELO]: "") || "",
+        SALE: to24h((idx.SALE>=0? cols[idx.SALE]: "") || ""),
+        LLEGA: to24h((idx.LLEGA>=0? cols[idx.LLEGA]: "") || ""),
+        Estatus: (idx.Estatus>=0? (cols[idx.Estatus] ? 1 : "") : ""),
+        Notas: (idx.Notas>=0? cols[idx.Notas]: "") || "",
+      };
+      return obj;
+    });
+    save(); render();
+  };
+  reader.readAsText(f,"utf-8");
+};
+
+// Seed initial
+const __SEED__ = [{"NOMBRE": "Ignacio Ilantada", "FECHA": "27/10/2025", "VUELO": "AM 928", "SALE": "12:55", "LLEGA": "14:37", "Estatus": "", "Notas": ""}, {"NOMBRE": "Antonio Herrera", "FECHA": "27/10/2025", "VUELO": "AM 928", "SALE": "12:55", "LLEGA": "14:37", "Estatus": "", "Notas": ""}, {"NOMBRE": "David Muñoz", "FECHA": "27/10/2025", "VUELO": "AM 928", "SALE": "12:55", "LLEGA": "14:37", "Estatus": "", "Notas": ""}, {"NOMBRE": "Sandor Hinojosa", "FECHA": "27/10/2025", "VUELO": "AM 950", "SALE": "18:25", "LLEGA": "20:13", "Estatus": "", "Notas": ""}, {"NOMBRE": "Jesús Eduardo Valdez Osuna", "FECHA": "27/10/2025", "VUELO": "AM 242", "SALE": "16:30", "LLEGA": "18:08", "Estatus": "", "Notas": ""}, {"NOMBRE": "José Razo", "FECHA": "27/10/2025", "VUELO": "AM 224", "SALE": "12:00", "LLEGA": "13:28", "Estatus": "", "Notas": ""}, {"NOMBRE": "Mariana Onofre", "FECHA": "27/10/2025", "VUELO": "AM 2460", "SALE": "11:40", "LLEGA": "12:43", "Estatus": "", "Notas": ""}, {"NOMBRE": "Javier Escobar", "FECHA": "27/10/2025", "VUELO": "AM 908", "SALE": "08:15", "LLEGA": "10:05", "Estatus": "", "Notas": ""}, {"NOMBRE": "Edgar Maldonado", "FECHA": "27/10/2025", "VUELO": "AM 928", "SALE": "12:55", "LLEGA": "14:37", "Estatus": "", "Notas": ""}, {"NOMBRE": "Alma Justine Núñez", "FECHA": "27/10/2025", "VUELO": "AM 246", "SALE": "17:45", "LLEGA": "19:20", "Estatus": "", "Notas": ""}, {"NOMBRE": "Marco Antonio Guerrero", "FECHA": "27/10/2025", "VUELO": "AM 246", "SALE": "17:45", "LLEGA": "19:20", "Estatus": "", "Notas": ""}, {"NOMBRE": "Jorge Juaristi", "FECHA": "27/10/2025", "VUELO": "AM 136", "SALE": "17:40", "LLEGA": "18:51", "Estatus": "", "Notas": ""}, {"NOMBRE": "Christian Delgado", "FECHA": "27/10/2025", "VUELO": "AM 546", "SALE": "17:35", "LLEGA": "21:10", "Estatus": "", "Notas": ""}, {"NOMBRE": "Daniel Zaldívar", "FECHA": "27/10/2025", "VUELO": "AM 908", "SALE": "08:15", "LLEGA": "10:05", "Estatus": "", "Notas": ""}, {"NOMBRE": "Juan Carlos Macías", "FECHA": "27/10/2025", "VUELO": "AM 908", "SALE": "08:15", "LLEGA": "10:05", "Estatus": "", "Notas": ""}];
+
+render();
+</script>
+</body>
+</html>
